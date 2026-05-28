@@ -29,6 +29,8 @@ import {
   Key
 } from 'lucide-react';
 
+/* global __firebase_config, __app_id, __initial_auth_token */
+
 // --- FIREBASE INITIALIZATION ---
 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
 const app = firebaseConfig ? initializeApp(firebaseConfig) : null;
