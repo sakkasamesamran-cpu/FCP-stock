@@ -1,6 +1,6 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
 import { 
   LayoutDashboard, 
@@ -26,17 +26,26 @@ import {
   Edit,
   X,
   Save,
-  Key
+  Key,
+  AlertTriangle,
+  Mail
 } from 'lucide-react';
 
-/* global __firebase_config, __app_id, __initial_auth_token */
-
 // --- FIREBASE INITIALIZATION ---
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-const app = firebaseConfig ? initializeApp(firebaseConfig) : null;
-const auth = app ? getAuth(app) : null;
-const db = app ? getFirestore(app) : null;
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = {
+  apiKey: "AIzaSyAXyzzjexgubDjmiMDbzPkIVaUr4UFfekI",
+  authDomain: "fcp-stock.firebaseapp.com",
+  projectId: "fcp-stock",
+  storageBucket: "fcp-stock.firebasestorage.app",
+  messagingSenderId: "714438152934",
+  appId: "1:714438152934:web:d5610349eed0c1cf986127",
+  measurementId: "G-R1T7555G40"
+};
+// นำ Config ไปเชื่อมต่อกับ Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = window.__app_id || "fcp-stock-app"; 
 
 const App = () => {
   // --- STATE MANAGEMENT ---
@@ -48,8 +57,27 @@ const App = () => {
   const [editingUserId, setEditingUserId] = useState(null);
   const [editUserName, setEditUserName] = useState('');
   
-  // Role State
-  const [currentUserRole, setCurrentUserRole] = useState(null); // 'admin' or 'user'
+  // Role & Session State (อัปเดตให้จำค่าจากการ Refresh 30 นาที อย่างรัดกุม)
+  const [currentUserRole, setCurrentUserRole] = useState(() => {
+    try {
+      const savedRole = localStorage.getItem('userRole');
+      const expiry = localStorage.getItem('sessionExpiry');
+      
+      if (savedRole && expiry) {
+        if (Date.now() < parseInt(expiry, 10)) {
+          console.log("Session restored from localStorage");
+          return savedRole;
+        } else {
+          console.log("Session expired, clearing localStorage");
+          localStorage.removeItem('userRole');
+          localStorage.removeItem('sessionExpiry');
+        }
+      }
+    } catch (e) {
+      console.error("Failed to read session from localStorage:", e);
+    }
+    return null;
+  }); 
   
   // Auth & Cloud State
   const [user, setUser] = useState(null);
@@ -64,7 +92,7 @@ const App = () => {
   const [lockoutUntil, setLockoutUntil] = useState(() => parseInt(localStorage.getItem('adminLockoutUntil') || '0'));
   const [remainingLockoutTime, setRemainingLockoutTime] = useState(0);
   
-  // App Data State (เริ่มต้นด้วยข้อมูลจำลอง)
+  // App Data State
   const [users, setUsers] = useState([
     { id: '1', name: 'สมชาย ช่างซ่อม' },
     { id: '2', name: 'สมหญิง ธุรการ' },
@@ -76,13 +104,13 @@ const App = () => {
 
   // --- CLOUD DATABASE EFFECTS ---
   
-  // 1. ระบบยืนยันตัวตน
+  // 1. ระบบยืนยันตัวตน (แบบไม่ระบุตัวตน สำหรับ Database)
   useEffect(() => {
     if (!auth) return;
     const initAuth = async () => {
       try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
+        if (window.__initial_auth_token) {
+          await signInWithCustomToken(auth, window.__initial_auth_token);
         } else {
           await signInAnonymously(auth);
         }
@@ -163,6 +191,40 @@ const App = () => {
   }, [lockoutUntil]);
 
   // --- HANDLERS ---
+  const handleLogout = useCallback(() => {
+    setCurrentUserRole(null);
+    setActiveTab('dashboard');
+    localStorage.removeItem('userRole');
+    localStorage.removeItem('sessionExpiry');
+  }, []);
+
+  // 6. ระบบตรวจสอบ Session หมดอายุ 30 นาที (ตรวจสอบทุกๆ 1 นาที)
+  useEffect(() => {
+    if (!currentUserRole) return;
+    
+    // ตรวจสอบทันทีที่เปลี่ยนแท็บ หรือเมื่อโหลดหน้าเสร็จ
+    const expiry = localStorage.getItem('sessionExpiry');
+    if (expiry && Date.now() >= parseInt(expiry, 10)) {
+       handleLogout();
+    }
+
+    const interval = setInterval(() => {
+      const currentExpiry = localStorage.getItem('sessionExpiry');
+      if (currentExpiry && Date.now() >= parseInt(currentExpiry, 10)) {
+        alert('เซสชันการใช้งานหมดอายุ (ครบ 30 นาที) กรุณาเข้าสู่ระบบใหม่');
+        handleLogout();
+      }
+    }, 60000); 
+
+    return () => clearInterval(interval);
+  }, [currentUserRole, handleLogout]);
+
+  const handleUserLogin = () => {
+    setCurrentUserRole('user');
+    localStorage.setItem('userRole', 'user');
+    localStorage.setItem('sessionExpiry', (Date.now() + 30 * 60 * 1000).toString());
+  };
+
   const handleAdminLogin = (e) => {
     e.preventDefault();
     
@@ -173,7 +235,11 @@ const App = () => {
 
     const pin = e.target.pin.value;
     if (pin === adminPassword) {
+      // เซฟ Session ลงเบราว์เซอร์
+      localStorage.setItem('userRole', 'admin');
+      localStorage.setItem('sessionExpiry', (Date.now() + 30 * 60 * 1000).toString());
       setCurrentUserRole('admin');
+      
       setLoginAttempts(0);
       localStorage.removeItem('adminLoginAttempts');
       localStorage.removeItem('adminLockoutUntil');
@@ -183,7 +249,7 @@ const App = () => {
       localStorage.setItem('adminLoginAttempts', newAttempts.toString());
       
       if (newAttempts >= 3) {
-        const lockTime = Date.now() + 5 * 60 * 1000; // 5 นาที (milliseconds)
+        const lockTime = Date.now() + 5 * 60 * 1000;
         setLockoutUntil(lockTime);
         localStorage.setItem('adminLockoutUntil', lockTime.toString());
         alert('กรอกรหัสผ่านผิด 3 ครั้ง! ระบบได้ทำการล็อคการเข้าใช้งาน Admin เป็นเวลา 5 นาที');
@@ -251,7 +317,6 @@ const App = () => {
     if (window.confirm('คุณต้องการลบรายชื่อนี้ใช่หรือไม่?')) {
       if (db && user) {
         await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', id));
-        // เผื่อกรณีที่เป็นข้อมูลจำลอง ให้ลบออกจาก local state ด้วย
         setUsers(prev => prev.filter(u => u.id !== id));
       } else {
         setUsers(users.filter(u => u.id !== id));
@@ -267,16 +332,13 @@ const App = () => {
     if (db && user) {
       try {
         const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', id);
-        // ใช้ setDoc ร่วมกับ merge: true แทน updateDoc เผื่อกรณีที่เป็นข้อมูลจำลองที่ไม่มีใน Firebase 
         await setDoc(userRef, { name: editUserName.trim() }, { merge: true });
-        // อัปเดตข้อมูลบนหน้าจอทันทีเผื่อยังไม่มีข้อมูลใน Cloud
         setUsers(prev => prev.map(u => u.id === id ? { ...u, name: editUserName.trim() } : u));
       } catch (error) {
         console.error("Error updating user: ", error);
         alert("เกิดข้อผิดพลาดในการแก้ไขข้อมูล");
       }
     } else {
-      // Fallback local state
       setUsers(users.map(u => u.id === id ? { ...u, name: editUserName.trim() } : u));
     }
     setEditingUserId(null);
@@ -403,6 +465,57 @@ const App = () => {
     return { totalBorrows, totalReturns, totalTransactions: transactions.length, totalUsers: users.length };
   }, [transactions, users]);
 
+  // คำนวณรายการเบิกที่ค้างคืนเกิน 3 วัน (เช็คจากเลข Work Order)
+  const overdueItems = useMemo(() => {
+    const woMap = {};
+    // เรียงจากเก่าไปใหม่ เพื่อไล่ลำดับการเบิก-คืน
+    const sortedT = [...transactions].sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    sortedT.forEach(t => {
+      if (!t.workOrder) return;
+      const wo = t.workOrder.trim();
+      if (!woMap[wo]) {
+         woMap[wo] = { status: 'CLEARED', borrowDate: null, user: null, items: null };
+      }
+      
+      // ถ้ามีการเบิก ให้ตั้งสถานะเป็น PENDING
+      if (t.type === 'BORROW') {
+         woMap[wo].status = 'PENDING';
+         woMap[wo].borrowDate = t.date;
+         woMap[wo].user = t.userName;
+         woMap[wo].items = t.items;
+      } 
+      // ถ้ามีการคืนของ WO นี้ ให้ตั้งสถานะเป็น CLEARED
+      else if (t.type === 'RETURN') {
+         woMap[wo].status = 'CLEARED';
+      }
+    });
+
+    const now = new Date();
+    const overdues = [];
+
+    for (const [wo, data] of Object.entries(woMap)) {
+      if (data.status === 'PENDING' && data.borrowDate) {
+         const bDate = new Date(data.borrowDate);
+         const diffTime = now.getTime() - bDate.getTime();
+         const diffDays = diffTime / (1000 * 3600 * 24);
+         
+         // ถ้าค้างเกิน 3 วัน (72 ชั่วโมง)
+         if (diffDays > 3) {
+            overdues.push({
+               workOrder: wo,
+               borrowDate: data.borrowDate,
+               userName: data.user,
+               items: data.items,
+               daysOverdue: Math.floor(diffDays)
+            });
+         }
+      }
+    }
+    // เรียงให้รายการที่ค้างนานที่สุดขึ้นก่อน
+    return overdues.sort((a,b) => b.daysOverdue - a.daysOverdue);
+  }, [transactions]);
+
   // --- COMPONENTS ---
 
   const DashboardTab = () => (
@@ -425,6 +538,36 @@ const App = () => {
           </div>
         </div>
       </div>
+
+      {/* แจ้งเตือนรายการค้างคืนเกิน 3 วัน */}
+      {overdueItems.length > 0 && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-6 shadow-sm">
+          <h3 className="text-lg font-bold text-red-700 flex items-center mb-4">
+            <AlertTriangle className="mr-2" size={24} />
+            แจ้งเตือน: มีรายการเบิกที่ค้างคืนเกิน 3 วัน ({overdueItems.length} รายการ)
+          </h3>
+          <div className="space-y-3">
+            {overdueItems.map((item, idx) => (
+              <div key={idx} className="bg-white p-4 rounded-lg border border-red-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                  <p className="font-semibold text-gray-800">Work Order: <span className="text-red-600">{item.workOrder}</span></p>
+                  <p className="text-sm text-gray-600 mt-1">
+                    ผู้เบิก: <span className="font-medium text-gray-900">{item.userName}</span> | 
+                    วันที่เบิก: {new Date(item.borrowDate).toLocaleDateString('th-TH')}
+                  </p>
+                  <p className="text-sm text-red-600 font-medium mt-1">ค้างมาแล้ว {item.daysOverdue} วัน</p>
+                </div>
+                <button 
+                  onClick={() => window.open(`mailto:?subject=แจ้งเตือนค้างคืนอะไหล่ WO: ${item.workOrder}&body=เรียนคุณ ${item.userName},%0D%0A%0D%0Aขอแจ้งเตือนการค้างคืนอะไหล่สำหรับ Work Order: ${item.workOrder} ซึ่งทำการเบิกไปเมื่อวันที่ ${new Date(item.borrowDate).toLocaleDateString('th-TH')} (ค้างมาแล้ว ${item.daysOverdue} วัน)%0D%0A%0D%0Aรายการอะไหล่:%0D%0A${item.items.replace(/\n/g, '%0D%0A')}%0D%0A%0D%0Aรบกวนดำเนินการตรวจสอบและนำมาคืนในระบบด้วยครับ%0D%0A%0D%0Aขอบคุณครับ`)}
+                  className="flex-shrink-0 flex items-center justify-center px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors shadow-sm"
+                >
+                  <Mail size={16} className="mr-2" /> ส่ง Email แจ้งเตือน
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <div onClick={() => navigateToHistory('ALL')} className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex items-center space-x-4 cursor-pointer hover:shadow-md hover:border-indigo-300 transition-all">
@@ -910,7 +1053,7 @@ const App = () => {
             <h2 className="text-center text-gray-800 font-semibold text-lg border-b pb-4">กรุณาเลือกสิทธิ์การเข้าใช้งาน</h2>
             
             <button 
-              onClick={() => setCurrentUserRole('user')}
+              onClick={handleUserLogin}
               className="w-full flex items-center justify-center space-x-3 bg-white border-2 border-gray-200 hover:border-indigo-500 hover:bg-indigo-50 text-gray-700 p-4 rounded-xl transition-all shadow-sm"
             >
               <UserCircle size={24} className="text-indigo-500" />
@@ -996,10 +1139,7 @@ const App = () => {
         </nav>
         <div className="p-4 border-t border-slate-800">
           <button 
-            onClick={() => {
-              setCurrentUserRole(null);
-              setActiveTab('dashboard');
-            }}
+            onClick={handleLogout}
             className="w-full flex items-center justify-center px-4 py-2 bg-slate-800 hover:bg-red-600 hover:text-white rounded-lg text-sm font-medium transition-colors text-slate-400"
           >
             <LogOut size={16} className="mr-2" /> ออกจากระบบ
@@ -1008,10 +1148,10 @@ const App = () => {
       </aside>
 
       <main className="flex-1 p-4 md:p-8 overflow-y-auto w-full">
-        {activeTab === 'dashboard' && <DashboardTab />}
-        {activeTab === 'transaction' && <TransactionTab />}
-        {activeTab === 'history' && <HistoryTab />}
-        {activeTab === 'users' && <UsersTab />}
+        {activeTab === 'dashboard' && DashboardTab()}
+        {activeTab === 'transaction' && TransactionTab()}
+        {activeTab === 'history' && HistoryTab()}
+        {activeTab === 'users' && UsersTab()}
       </main>
 
     </div>
