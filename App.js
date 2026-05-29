@@ -1,7 +1,8 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
+// 🌟 เปลี่ยนแปลง: นำ onSnapshot ออก และเพิ่ม getDocs เข้ามาแทน
+import { getFirestore, collection, getDocs, addDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
 import { 
   LayoutDashboard, 
   ArrowRightLeft, 
@@ -28,11 +29,14 @@ import {
   Save,
   Key,
   AlertTriangle,
-  Mail
+  Mail,
+  RefreshCw // 🌟 เพิ่มไอคอนรีเฟรช
 } from 'lucide-react';
 
 // --- FIREBASE INITIALIZATION ---
-const firebaseConfig = {
+const firebaseConfig = window.__firebase_config 
+  ? JSON.parse(window.__firebase_config) 
+  : {
   apiKey: "AIzaSyAXyzzjexgubDjmiMDbzPkIVaUr4UFfekI",
   authDomain: "fcp-stock.firebaseapp.com",
   projectId: "fcp-stock",
@@ -40,8 +44,8 @@ const firebaseConfig = {
   messagingSenderId: "714438152934",
   appId: "1:714438152934:web:d5610349eed0c1cf986127",
   measurementId: "G-R1T7555G40"
-};
-// นำ Config ไปเชื่อมต่อกับ Firebase
+    };
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
@@ -52,12 +56,13 @@ const App = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [historyFilter, setHistoryFilter] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
+  const [isRefreshing, setIsRefreshing] = useState(false); // 🌟 สถานะปุ่มกดรีเฟรช
   
   // Edit User State
   const [editingUserId, setEditingUserId] = useState(null);
   const [editUserName, setEditUserName] = useState('');
   
-  // Role & Session State (อัปเดตให้จำค่าจากการ Refresh 30 นาที อย่างรัดกุม)
+  // Role & Session State
   const [currentUserRole, setCurrentUserRole] = useState(() => {
     try {
       const savedRole = localStorage.getItem('userRole');
@@ -65,10 +70,8 @@ const App = () => {
       
       if (savedRole && expiry) {
         if (Date.now() < parseInt(expiry, 10)) {
-          console.log("Session restored from localStorage");
           return savedRole;
         } else {
-          console.log("Session expired, clearing localStorage");
           localStorage.removeItem('userRole');
           localStorage.removeItem('sessionExpiry');
         }
@@ -104,7 +107,7 @@ const App = () => {
 
   // --- CLOUD DATABASE EFFECTS ---
   
-  // 1. ระบบยืนยันตัวตน (แบบไม่ระบุตัวตน สำหรับ Database)
+  // 1. ระบบยืนยันตัวตน
   useEffect(() => {
     if (!auth) return;
     const initAuth = async () => {
@@ -127,46 +130,46 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
-  // 2. โหลดข้อมูลรายชื่อผู้ใช้งานจาก Cloud
-  useEffect(() => {
+  // 🌟 ฟังก์ชันดึงข้อมูลแบบ Manual (ประหยัดโควต้าสุดๆ)
+  const fetchAllData = useCallback(async () => {
     if (!user || !db) return;
-    const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
-    const unsubscribe = onSnapshot(usersRef, (snapshot) => {
-      const usersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      if (usersData.length > 0 || snapshot.metadata.hasPendingWrites) {
-        setUsers(usersData);
-      }
-    }, (err) => console.error("Users sync error:", err));
-    return () => unsubscribe();
-  }, [user]);
+    setIsRefreshing(true);
+    try {
+      // ดึงข้อมูล Users
+      const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
+      const usersSnap = await getDocs(usersRef);
+      const usersData = usersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setUsers(usersData);
 
-  // 3. โหลดข้อมูลประวัติรายการจาก Cloud
-  useEffect(() => {
-    if (!user || !db) return;
-    const transRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
-    const unsubscribe = onSnapshot(transRef, (snapshot) => {
-      const transData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // ดึงข้อมูล Transactions
+      const transRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
+      const transSnap = await getDocs(transRef);
+      const transData = transSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       transData.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      if (transData.length > 0 || snapshot.metadata.hasPendingWrites) {
-        setTransactions(transData);
-      }
-    }, (err) => console.error("Transactions sync error:", err));
-    return () => unsubscribe();
-  }, [user]);
+      setTransactions(transData);
 
-  // 4. โหลดรหัสผ่าน Admin จาก Cloud
+      // ดึงรหัสผ่าน Admin
+      const settingsRef = collection(db, 'artifacts', appId, 'public', 'data', 'settings');
+      const settingsSnap = await getDocs(settingsRef);
+      settingsSnap.docs.forEach(doc => {
+        if (doc.id === 'adminConfig' && doc.data().password) {
+          setAdminPassword(doc.data().password);
+        }
+      });
+    } catch (err) {
+      console.error("Error fetching data:", err);
+    }
+    setIsRefreshing(false);
+  }, [user]); // เอา db ออกตามคำแนะนำของ ESLint
+
+  // สั่งโหลดข้อมูลแค่ครั้งแรกที่เข้าเว็บ
   useEffect(() => {
-    if (!user || !db) return;
-    const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'adminConfig');
-    const unsubscribe = onSnapshot(settingsRef, (docSnap) => {
-      if (docSnap.exists() && docSnap.data().password) {
-        setAdminPassword(docSnap.data().password);
-      }
-    }, (err) => console.error("Admin config sync error:", err));
-    return () => unsubscribe();
-  }, [user]);
+    if (user && db) {
+      fetchAllData();
+    }
+  }, [user, fetchAllData]); // เอา db ออกตามคำแนะนำของ ESLint
 
-  // 5. จัดการระบบล็อคการเข้าใช้งาน Admin (Lockout Timer)
+  // 5. จัดการระบบล็อคการเข้าใช้งาน Admin
   useEffect(() => {
     let interval;
     if (lockoutUntil > Date.now()) {
@@ -190,7 +193,7 @@ const App = () => {
     return () => clearInterval(interval);
   }, [lockoutUntil]);
 
-  // --- HANDLERS ---
+  // 6. ระบบตรวจสอบ Session หมดอายุ 30 นาที
   const handleLogout = useCallback(() => {
     setCurrentUserRole(null);
     setActiveTab('dashboard');
@@ -198,16 +201,12 @@ const App = () => {
     localStorage.removeItem('sessionExpiry');
   }, []);
 
-  // 6. ระบบตรวจสอบ Session หมดอายุ 30 นาที (ตรวจสอบทุกๆ 1 นาที)
   useEffect(() => {
     if (!currentUserRole) return;
-    
-    // ตรวจสอบทันทีที่เปลี่ยนแท็บ หรือเมื่อโหลดหน้าเสร็จ
     const expiry = localStorage.getItem('sessionExpiry');
     if (expiry && Date.now() >= parseInt(expiry, 10)) {
        handleLogout();
     }
-
     const interval = setInterval(() => {
       const currentExpiry = localStorage.getItem('sessionExpiry');
       if (currentExpiry && Date.now() >= parseInt(currentExpiry, 10)) {
@@ -215,10 +214,10 @@ const App = () => {
         handleLogout();
       }
     }, 60000); 
-
     return () => clearInterval(interval);
   }, [currentUserRole, handleLogout]);
 
+  // --- HANDLERS ---
   const handleUserLogin = () => {
     setCurrentUserRole('user');
     localStorage.setItem('userRole', 'user');
@@ -227,19 +226,15 @@ const App = () => {
 
   const handleAdminLogin = (e) => {
     e.preventDefault();
-    
     if (lockoutUntil > Date.now()) {
       alert(`ไม่สามารถเข้าสู่ระบบได้ กรุณารออีก ${Math.ceil((lockoutUntil - Date.now()) / 60000)} นาที`);
       return;
     }
-
     const pin = e.target.pin.value;
     if (pin === adminPassword) {
-      // เซฟ Session ลงเบราว์เซอร์
       localStorage.setItem('userRole', 'admin');
       localStorage.setItem('sessionExpiry', (Date.now() + 30 * 60 * 1000).toString());
       setCurrentUserRole('admin');
-      
       setLoginAttempts(0);
       localStorage.removeItem('adminLoginAttempts');
       localStorage.removeItem('adminLockoutUntil');
@@ -247,7 +242,6 @@ const App = () => {
       const newAttempts = loginAttempts + 1;
       setLoginAttempts(newAttempts);
       localStorage.setItem('adminLoginAttempts', newAttempts.toString());
-      
       if (newAttempts >= 3) {
         const lockTime = Date.now() + 5 * 60 * 1000;
         setLockoutUntil(lockTime);
@@ -266,31 +260,26 @@ const App = () => {
     const confirm = e.target.confirmPassword.value;
 
     if (current !== adminPassword) {
-      alert('รหัสผ่านเดิมไม่ถูกต้อง!');
-      return;
+      alert('รหัสผ่านเดิมไม่ถูกต้อง!'); return;
     }
     if (newPass !== confirm) {
-      alert('รหัสผ่านใหม่และการยืนยันไม่ตรงกัน!');
-      return;
+      alert('รหัสผ่านใหม่และการยืนยันไม่ตรงกัน!'); return;
     }
     if (newPass.length < 4) {
-      alert('รหัสผ่านใหม่ต้องมีอย่างน้อย 4 ตัวอักษร');
-      return;
+      alert('รหัสผ่านใหม่ต้องมีอย่างน้อย 4 ตัวอักษร'); return;
     }
 
     if (db) {
       try {
         const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'adminConfig');
         await setDoc(settingsRef, { password: newPass }, { merge: true });
+        setAdminPassword(newPass); // 🌟 อัปเดตทันที
       } catch (error) {
-        console.error("Error updating password: ", error);
-        alert("เกิดข้อผิดพลาดในการเปลี่ยนรหัสผ่าน");
-        return;
+        alert("เกิดข้อผิดพลาดในการเปลี่ยนรหัสผ่าน"); return;
       }
     } else {
       setAdminPassword(newPass);
     }
-
     alert('เปลี่ยนรหัสผ่านสำเร็จ!');
     setIsChangePasswordModalOpen(false);
   };
@@ -300,9 +289,11 @@ const App = () => {
     const name = e.target.elements.userName.value.trim();
     if (!name) return;
 
+    const newUser = { name };
     if (db) {
       const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
-      await addDoc(usersRef, { name });
+      const docRef = await addDoc(usersRef, newUser);
+      setUsers([...users, { id: docRef.id, ...newUser }]); // 🌟 อัปเดต UI ทันทีไม่ต้องโหลดใหม่
     } else {
       setUsers([...users, { id: Date.now().toString(), name }]);
     }
@@ -311,51 +302,42 @@ const App = () => {
 
   const handleDeleteUser = async (id) => {
     if (currentUserRole !== 'admin') {
-      alert('เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่สามารถลบผู้ใช้งานได้');
-      return;
+      alert('เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่สามารถลบผู้ใช้งานได้'); return;
     }
     if (window.confirm('คุณต้องการลบรายชื่อนี้ใช่หรือไม่?')) {
       if (db && user) {
         await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', id));
-        setUsers(prev => prev.filter(u => u.id !== id));
-      } else {
-        setUsers(users.filter(u => u.id !== id));
       }
+      setUsers(prev => prev.filter(u => u.id !== id)); // 🌟 อัปเดต UI ทันที
     }
   };
 
   const handleSaveEditUser = async (id) => {
     if (!editUserName.trim()) {
-      alert('กรุณาระบุชื่อ-นามสกุล');
-      return;
+      alert('กรุณาระบุชื่อ-นามสกุล'); return;
     }
     if (db && user) {
       try {
         const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', id);
         await setDoc(userRef, { name: editUserName.trim() }, { merge: true });
-        setUsers(prev => prev.map(u => u.id === id ? { ...u, name: editUserName.trim() } : u));
       } catch (error) {
-        console.error("Error updating user: ", error);
-        alert("เกิดข้อผิดพลาดในการแก้ไขข้อมูล");
+        alert("เกิดข้อผิดพลาดในการแก้ไขข้อมูล"); return;
       }
-    } else {
-      setUsers(users.map(u => u.id === id ? { ...u, name: editUserName.trim() } : u));
     }
+    setUsers(prev => prev.map(u => u.id === id ? { ...u, name: editUserName.trim() } : u)); // 🌟 อัปเดต UI ทันที
     setEditingUserId(null);
     setEditUserName('');
   };
 
   const handleDeleteTransaction = async (id) => {
     if (currentUserRole !== 'admin') {
-      alert('เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่สามารถลบประวัติได้');
-      return;
+      alert('เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่สามารถลบประวัติได้'); return;
     }
     if (window.confirm('คุณต้องการลบประวัติรายการนี้ใช่หรือไม่?')) {
       if (db && user) {
         await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'transactions', id));
-      } else {
-        setTransactions(transactions.filter(t => t.id !== id));
       }
+      setTransactions(prev => prev.filter(t => t.id !== id)); // 🌟 อัปเดต UI ทันที
     }
   };
 
@@ -364,11 +346,7 @@ const App = () => {
     newItems[index] = value;
     setTransactionItems(newItems);
   };
-
-  const handleAddItem = () => {
-    setTransactionItems([...transactionItems, '']);
-  };
-
+  const handleAddItem = () => setTransactionItems([...transactionItems, '']);
   const handleRemoveItem = (index) => {
     const newItems = transactionItems.filter((_, i) => i !== index);
     setTransactionItems(newItems.length > 0 ? newItems : ['']);
@@ -383,13 +361,9 @@ const App = () => {
     const type = formData.get('type');
     const purpose = formData.get('purpose');
     
-    const validItems = transactionItems
-      .map(item => item.trim())
-      .filter(item => item.length > 0);
-
+    const validItems = transactionItems.map(item => item.trim()).filter(item => item.length > 0);
     if (!userId || !workOrder || !customerName || !purpose || validItems.length === 0) {
-        alert('กรุณากรอกข้อมูลให้ครบถ้วน');
-        return;
+        alert('กรุณากรอกข้อมูลให้ครบถ้วน'); return;
     }
 
     const formattedItems = validItems.map((item, index) => `${index + 1}. ${item}`).join('\n');
@@ -408,13 +382,16 @@ const App = () => {
 
     if (db) {
       const transRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
-      await addDoc(transRef, newTransaction);
+      const docRef = await addDoc(transRef, newTransaction);
+      newTransaction.id = docRef.id;
     } else {
       newTransaction.id = Date.now().toString();
-      setTransactions([newTransaction, ...transactions]);
     }
 
-    alert('บันทึกรายการลงฐานข้อมูลสำเร็จ');
+    // 🌟 เอาข้อมูลใส่ตารางทันที ไม่ต้องโหลดใหม่จากฐานข้อมูล
+    setTransactions(prev => [newTransaction, ...prev]);
+
+    alert('บันทึกรายการสำเร็จ');
     e.target.reset();
     setTransactionItems(['']);
     setHistoryFilter('ALL');
@@ -428,15 +405,11 @@ const App = () => {
 
   const handleExportExcel = () => {
     const filteredTransactions = transactions.filter(t => historyFilter === 'ALL' || t.type === historyFilter);
-
     if (filteredTransactions.length === 0) {
-      alert('ไม่มีข้อมูลสำหรับ Export');
-      return;
+      alert('ไม่มีข้อมูลสำหรับ Export'); return;
     }
-
     let csvContent = '\uFEFF'; 
     csvContent += "วัน/เวลา,เลข Work order,ชื่อลูกค้า,วัตถุประสงค์,ผู้ทำรายการ,ประเภท,รายการอะไหล่\n";
-
     filteredTransactions.forEach(t => {
       const date = new Date(t.date).toLocaleString('th-TH');
       const wo = `"${t.workOrder || '-'}"`;
@@ -447,7 +420,6 @@ const App = () => {
       const items = `"${t.items.replace(/"/g, '""')}"`;
       csvContent += `${date},${wo},${customer},${purpose},${name},${type},${items}\n`;
     });
-
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -465,10 +437,8 @@ const App = () => {
     return { totalBorrows, totalReturns, totalTransactions: transactions.length, totalUsers: users.length };
   }, [transactions, users]);
 
-  // คำนวณรายการเบิกที่ค้างคืนเกิน 3 วัน (เช็คจากเลข Work Order)
   const overdueItems = useMemo(() => {
     const woMap = {};
-    // เรียงจากเก่าไปใหม่ เพื่อไล่ลำดับการเบิก-คืน
     const sortedT = [...transactions].sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
     sortedT.forEach(t => {
@@ -477,42 +447,30 @@ const App = () => {
       if (!woMap[wo]) {
          woMap[wo] = { status: 'CLEARED', borrowDate: null, user: null, items: null };
       }
-      
-      // ถ้ามีการเบิก ให้ตั้งสถานะเป็น PENDING
       if (t.type === 'BORROW') {
          woMap[wo].status = 'PENDING';
          woMap[wo].borrowDate = t.date;
          woMap[wo].user = t.userName;
          woMap[wo].items = t.items;
-      } 
-      // ถ้ามีการคืนของ WO นี้ ให้ตั้งสถานะเป็น CLEARED
-      else if (t.type === 'RETURN') {
+      } else if (t.type === 'RETURN') {
          woMap[wo].status = 'CLEARED';
       }
     });
 
     const now = new Date();
     const overdues = [];
-
     for (const [wo, data] of Object.entries(woMap)) {
       if (data.status === 'PENDING' && data.borrowDate) {
          const bDate = new Date(data.borrowDate);
          const diffTime = now.getTime() - bDate.getTime();
          const diffDays = diffTime / (1000 * 3600 * 24);
-         
-         // ถ้าค้างเกิน 3 วัน (72 ชั่วโมง)
          if (diffDays > 3) {
             overdues.push({
-               workOrder: wo,
-               borrowDate: data.borrowDate,
-               userName: data.user,
-               items: data.items,
-               daysOverdue: Math.floor(diffDays)
+               workOrder: wo, borrowDate: data.borrowDate, userName: data.user, items: data.items, daysOverdue: Math.floor(diffDays)
             });
          }
       }
     }
-    // เรียงให้รายการที่ค้างนานที่สุดขึ้นก่อน
     return overdues.sort((a,b) => b.daysOverdue - a.daysOverdue);
   }, [transactions]);
 
@@ -520,10 +478,20 @@ const App = () => {
 
   const DashboardTab = () => (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex justify-between items-center flex-wrap gap-4">
         <h2 className="text-2xl font-bold text-gray-800">แดชบอร์ดสรุปภาพรวม</h2>
         
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center flex-wrap gap-3">
+          {/* 🌟 เพิ่มปุ่มรีเฟรชข้อมูล */}
+          <button 
+            onClick={fetchAllData} 
+            disabled={isRefreshing}
+            className={`flex items-center px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${isRefreshing ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white hover:bg-blue-50 text-blue-600 border-blue-200 shadow-sm'}`}
+          >
+            <RefreshCw size={14} className={`mr-1.5 ${isRefreshing ? 'animate-spin' : ''}`} /> 
+            {isRefreshing ? 'กำลังโหลด...' : 'รีเฟรชอัปเดตข้อมูล'}
+          </button>
+
           {currentUserRole === 'admin' && (
             <button 
               onClick={() => setIsChangePasswordModalOpen(true)} 
